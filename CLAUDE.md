@@ -12,7 +12,7 @@ The model is a **vision-language model**, so it can also read images when asked.
 **Status:** planning. No code yet — PLAN.md and this file only.
 
 ## Architecture in one breath
-`/init` scrapes messages → JSONL (collect) → QLoRA on a **4060** (train) →
+Scrape (offline script + live append) → JSONL (collect) → QLoRA on a **4060** (train) →
 merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 **weekly retrain** loop. Train on GPU, serve on CPU — two different machines.
 
@@ -68,8 +68,8 @@ merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 ## Commands
 _None yet — fill in as the project is scaffolded (M0)._
 - run bot: `TBD`
-- scrape: `/init` — **owner-gated**, or offline `scripts/scrape.py` (not public)
-- chattiness: `/activity [0..1] [scope]` (anyone)
+- scrape: offline `scripts/scrape.py` (owner-run) + live append; optional owner-gated `/init`
+- chattiness: `/activity [0..1] [scope]` (anyone, per-channel or global)
 - mute / unmute: `/sleep [scope] [duration]` · `/wake` (anyone)
 - preprocess / finetune / export / weekly-retrain: `TBD`
 

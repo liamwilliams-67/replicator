@@ -55,20 +55,25 @@ baggage and minimal refusal behavior.
 
 ---
 
-## 3. Stage 1 — Data collection (`/init`)
+## 3. Stage 1 — Data collection (offline scrape + live append)
 
-Privileged, admin-only slash command that scrapes the server into a corpus.
+Two paths into the corpus: a one-time **offline backfill** (`scripts/scrape.py`,
+run by *you* with the bot token) for all history, and **live append** by the
+running bot for new messages (so the backup stays current without re-scraping). An
+owner-gated `/init` slash command is *optional* if you'd rather kick a backfill
+from inside Discord — but the offline script is the primary path (you're not a
+server admin, and it keeps a heavy scrape out of random hands).
 
 **Discord requirements**
 - **Message Content Intent** (privileged) enabled in the Developer Portal, else
   scraped content is empty.
 - Permissions: *Read Message History*, *View Channels*.
-- Slash commands must ack within 3s → `/init` **defers** and scrapes in the
-  background, posting progress follow-ups.
-- **Trigger/permissions:** the heavy scrape is **owner-gated** (the *bot-application
-  owner* — works even though you're not a server admin), or better, run the same
-  logic as an **offline script** (`scripts/scrape.py`) with the bot token so it
-  isn't a public command randoms can fire (§7, §12).
+- The **offline script** runs to completion with progress logged to the console —
+  no 3s slash-command ack limit to fight. If the optional `/init` is used, it must
+  **defer** within 3s and post progress as follow-ups.
+- **Live append:** the running bot writes each new (non-bot) message to the corpus
+  as it arrives, sharing the decode/clean logic with the offline script (§4) so the
+  weekly backup (§10) stays current with no re-scrape.
 
 **Scope (easy to miss):** regular text channels **and threads + forum-channel
 posts** (each thread is its own channel). Skip voice/stage unless they have text.
@@ -99,7 +104,8 @@ posts** (each thread is its own channel). Skip voice/stage unless they have text
   reading (§9).
 - JSONL streams and survives interruption; `discord.py` handles rate limits.
 
-**Deliverable:** `bot/init_scrape.py`, raw JSONL, per-channel cursor state.
+**Deliverable:** `scripts/scrape.py` (backfill + incremental), live-append in the
+bot, raw JSONL, per-channel cursor state.
 
 ---
 
@@ -249,7 +255,8 @@ on_message(msg):
   call → saves CPU). `1` = chime in on nearly every message. Implemented by reading
   the model's first-token **REPLY-vs-IGNORE probability** and replying when it
   clears a threshold set by `activity` — principled (still respects context), not a
-  blind coin. Settable **globally or per-channel**; default low.
+  blind coin. Settable **globally or per-channel** — persisted per-channel overrides
+  on top of a global default (e.g. `#general` 0.4, `#serious` 0.05); default low.
 - **Don't-interrupt backoff:** on top of `activity`, lower the effective chance
   during **active 2+ human exchanges** (strong at low activity, minimal near `1`),
   plus a post-speak **cooldown** — so even when chatty it waits for lulls. The
@@ -340,8 +347,9 @@ window also helps **training** (we show long conversations, §5).
 QLoRA on a 0.8B model is cheap (likely well under an hour on a 4060), so a weekly
 refresh is very feasible. Automated pipeline (cron on the train box):
 
-1. **Backup / pull new messages** — incremental `/init` cursor (§3) appends to the
-   canonical corpus. Text is tiny (even ~1M msgs ≈ a few hundred MB JSONL).
+1. **Backup / pull new messages** — live-append + the incremental scrape script
+   (§3) keep the canonical corpus current. Text is tiny (even ~1M msgs ≈ a few
+   hundred MB JSONL). Back it up off-box (§12 #19).
 2. **Rebuild** train/val with **recency weighting** so new slang/terms surface,
    and **excluding the bot's own output** (critical — else it mimics itself and
    drifts; §12 #2).
@@ -450,11 +458,11 @@ Moderation is *none* by design — operational notes only, not filtering:
 replicator/
   CLAUDE.md  PLAN.md  README.md
   pyproject.toml / requirements.txt   .env.example   config.example.yaml
-  bot/        main.py discord_client.py init_scrape.py inference.py
+  bot/        main.py discord_client.py inference.py
               formatting.py memory.py media.py config.py
   data_pipeline/  preprocess.py build_decision_labels.py template.py
   training/   finetune.py export_gguf.py configs/
-  scripts/    weekly_retrain.sh
+  scripts/    scrape.py weekly_retrain.sh
   data/       raw/ processed/ memory.db state.json   # git-ignored
   assets/     media/ media_manifest.json events.md
   models/     replicator.gguf mmproj.gguf            # git-ignored
@@ -466,7 +474,8 @@ replicator/
 ## 15. Milestones
 
 - **M0 — Scaffold:** skeleton, deps, config, `.gitignore`, bot connects, `/ping`.
-- **M1 — Collect:** `/init` incremental scrape (incl. threads/forums + thumbnails) → JSONL.
+- **M1 — Collect:** offline `scripts/scrape.py` backfill + live append (incl.
+  threads/forums + thumbnails) → JSONL; optional owner-gated `/init`.
 - **M2 — Preprocess:** raw → `{train,val,holdout}.jsonl` with decision sentinels,
   media captions/tags, mention/emoji decoding, bot-output exclusion.
 - **M3 — Spike (de-risk):** convert *stock* Qwen3.5-0.8B-Base (and `mmproj`) to

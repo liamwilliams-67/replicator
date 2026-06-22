@@ -23,13 +23,15 @@ Three stages, two machines:
 
 - **Train** on the 4060 (8GB assumed) with QLoRA — cheap; fits easily for 0.8B.
   We only finetune the **text/style** behavior; the vision tower is left as-is.
-- **Serve** on the 4-core / 24GB / 150GiB CPU box via `llama.cpp` (GGUF, 4-bit),
-  **text-only by default** for speed, with vision invoked **lazily** (§9).
+- **Serve** on the 4-core / 24GB / 150GiB CPU box via `llama.cpp` (GGUF, 4-bit).
+  Latency budget is generous (**~10 t/s, ≤~1 min/reply**) so we **maximize
+  context** (§8, §11), leaning on **prefix/KV-cache reuse**. Vision is loaded but
+  invoked only when media is present (§9).
 - The bot **decides for itself** whether to chime in on undirected messages, but
   **must** reply when @mentioned or replied-to.
 - It can **send** a GIF/image from a curated list, **read** incoming links/GIFs/
-  images, remember far back via a **tiered memory** (§8), and stay current via a
-  **weekly retrain** (§10).
+  images/video-thumbnails, remember far back via a **tiered memory** (§8), and
+  stay current via a **weekly retrain** (§10).
 
 ---
 
@@ -37,13 +39,14 @@ Three stages, two machines:
 
 | # | Decision | Choice | Consequence |
 |---|----------|--------|-------------|
-| 1 | Inference hardware | **CPU-only box** (4060 is train-only) | `llama.cpp`/GGUF, 4 threads, small quant. ~10–30 t/s. |
+| 1 | Inference hardware | **CPU-only box** (4060 is train-only) | `llama.cpp`/GGUF, 4 threads. Target **~10 t/s, ≤~60s/reply** → spend the budget on **max context**. |
 | 2 | Persona | **Blended group voice** | One *cohesive, human-sounding* voice distilled from the group — not per-user impersonation, not a sanitized committee. |
 | 3 | Reply decision | **Model decides via a sentinel token** | Emits `REPLY`/`IGNORE` as its first token; `IGNORE` = 1 token then stop. |
 | 4 | Output moderation | **None (raw mimicry)** | No runtime filter; 18+ content is in scope (§13 for the one legal line). |
-| 5 | Reading media | **Links + GIFs (title-first, vision fallback); images via lazy vision** | Model *is* a VLM; vision runs only when engaged. Video = metadata only. |
-| 6 | Memory | **Tiered (recent + retrieval over all history + events digest + metadata)** | Covers "far back" without paying 262k-token prefill. |
+| 5 | Reading media | **Links→text; GIF→single frame; video→Discord thumbnail; image→vision** | Model *is* a VLM; media captioned at consideration time so the bot can react to it. |
+| 6 | Memory | **Tiered, context-maximizing** (recent window + retrieval over all history + events digest + metadata) | Covers "far back" and fills the latency budget via cache reuse — not a 262k prefill. |
 | 7 | Freshness | **Weekly full retrain from base** | Backup → retrain → eval gate → hot-swap. Recency-weighted. |
+| 8 | Interjection | **Reserved + kill switch** | Gate biased to `IGNORE`, backs off during active human convos; `/sleep`·`/wake` admin mute (persisted). |
 
 Base (not Instruct) is the right call: instruct/RLHF variants are aligned to be
 friendly and would fight the "aggressive/less friendly" target. A base model
@@ -75,7 +78,8 @@ posts** (each thread is its own channel). Skip voice/stage unless they have text
   "timestamp": "2026-06-22T05:54:00Z",
   "content": "yo <@123> look at this",
   "reply_to": "<message_id or null>",
-  "attachments": [{"url": "...", "content_type": "image/gif", "source": "tenor"}],
+  "attachments": [{"url": "...", "content_type": "image/gif", "source": "tenor",
+                   "thumbnail": "<discord proxy/thumbnail url>"}],
   "edited": false
 }
 ```
@@ -83,10 +87,12 @@ posts** (each thread is its own channel). Skip voice/stage unless they have text
 **Behavior**
 - Iterate every readable channel + thread; paginate oldest→newest.
 - **Incremental:** persist last-scraped `message_id` per channel
-  (`data/state.json`) so re-runs only fetch new messages — this also feeds the
-  weekly backup (§10).
+  (`data/state.json`) so re-runs only fetch new messages — this feeds the weekly
+  backup (§10).
 - **Exclude our own bot and other bots** from being training *targets* (see §4,
   feedback-loop hole). Tag them at capture so preprocessing can filter.
+- Capture attachment **thumbnails** (Discord proxy URLs) — needed for video
+  reading (§9).
 - JSONL streams and survives interruption; `discord.py` handles rate limits.
 
 **Deliverable:** `bot/init_scrape.py`, raw JSONL, per-channel cursor state.
@@ -121,16 +127,22 @@ At inference we feed context + `‹DECIDE›\n` and read the first token(s): `IG
 > so they survive finetune → merge → GGUF → quantize. A round-trip test is in §6.
 
 ### Example construction
-- **Context window:** last *K* messages / ≤~1–2k tokens. Reset at large time gaps.
+- **Context window:** as long as the latency budget allows (§8/§11) — we want the
+  finetune to *use* long context. Reset at large time gaps.
 - **Blended voice:** the target message's original author is dropped — the bot
   speaks as "the group."
 - **Decision labels (feature #3):**
   - **REPLY** — message *got* a response (actual reply-reference, or a different
     user posted within ~2 min). Target = that response.
   - **IGNORE** — no response within the window. Target = `IGNORE`. Balanced vs REPLY.
-  - **Forced-reply** — message @mentions/relies-to the bot → always REPLY.
-- **Media-send tokens:** attachment-only messages → `REPLY: [GIF:<tag>]` (tags
-  from the manifest, §9) so the bot learns to answer with a reaction image.
+  - **Forced-reply** — message @mentions/replies-to the bot → always REPLY.
+  - **Reservedness** — over-sample `IGNORE` for messages mid-exchange between two
+    active humans (learn to stay *out* of flowing convos), so REPLY skews toward
+    lulls, direct address, or group-wide prompts. Reinforces the runtime gate (§7).
+- **Media examples:** for messages whose context includes an image/GIF/video, the
+  context line carries the **caption** (`[image] <caption>` / `[gif] <caption>`),
+  so the finetune learns to react to described media. Attachment-only messages
+  the bot would answer with a reaction map to `REPLY: [GIF:<tag>]` (tags from §9).
 
 ### Cleaning (several holes live here)
 - **Drop the bot's own + other bots' messages as targets** (prevents the model
@@ -155,7 +167,8 @@ At inference we feed context + `‹DECIDE›\n` and read the first token(s): `IG
 - **We finetune text/style only** — leave the vision encoder/projector frozen.
 - **Config (start):** LoRA `r=32, α=32, dropout=0.05` on attn + MLP/expert projs;
   grad checkpointing; paged 8-bit AdamW; bf16/fp16; packing; cosine LR ~2e-4;
-  1–3 epochs; loss masked to the completion only.
+  1–3 epochs; loss masked to the completion only. Train at a **long sequence
+  length** so the model learns to use the large serve-time context.
 - **Eval:** val loss + the **frozen holdout** + eyeball samples (tone? correct
   IGNOREs?). The holdout is the gate for weekly retrains (§10).
 - **Overfitting guard:** a 0.8B model repeats easily — dedupe hard, small LoRA,
@@ -170,12 +183,14 @@ At inference we feed context + `‹DECIDE›\n` and read the first token(s): `IG
 ## 6. Stage 2c — Export for CPU inference
 
 1. **Merge** LoRA → fp16.
-2. **Convert** to GGUF (`llama.cpp/convert_hf_to_gguf.py`). If vision is enabled,
-   also produce/obtain the **`mmproj`** (vision projector) GGUF.
-3. **Quantize** → `Q4_K_M` (CPU sweet spot); test `Q5_K_M`/`Q8_0` (all small at 0.8B).
+2. **Convert** to GGUF (`llama.cpp/convert_hf_to_gguf.py`). For vision, also
+   produce/obtain the **`mmproj`** (vision projector) GGUF.
+3. **Quantize** → `Q4_K_M` (CPU sweet spot); test `Q5_K_M`/`Q8_0` (all small at
+   0.8B). Consider a **quantized KV cache** to make a big context cheap (§8).
 4. **Round-trip test:** confirm `REPLY`/`IGNORE` + `[GIF:tag]` still behave after
    quantization.
-5. **Benchmark t/s** on the real CPU box (§11).
+5. **Benchmark t/s + prefill speed** on the real CPU box — this sets the actual
+   context budget (§8, §11).
 
 > ⚠️ **Top risk lives here** — `llama.cpp` must support the Qwen3.5 MoE/Gated-
 > DeltaNet arch (and the VL `mmproj`) at conversion time. Validate with an **early
@@ -191,7 +206,12 @@ At inference we feed context + `‹DECIDE›\n` and read the first token(s): `IG
 
 ### Inference server
 - `llama.cpp` (`llama-server` / `llama-cpp-python`; `llama-mtmd-cli` path for
-  vision), `n_threads=4`, model resident in RAM, context ~1.5–3k tokens (§8).
+  vision), `n_threads=4`, model resident in RAM.
+- **Prefix/KV-cache reuse per channel (the key to big context):** keep a
+  persistent slot per active channel so the recent-window prefix is prefilled once
+  and reused; each turn only the *new* message tokens (+ volatile memory) are
+  prefilled. This is what makes a large context affordable at ~10 t/s.
+- Context **sized to the latency budget**, not minimized (§8, §11).
 - **Single-worker generation queue** — 4 cores can't generate concurrently;
   serialize, **drop stale** requests (don't answer a question the convo moved past).
 
@@ -199,9 +219,11 @@ At inference we feed context + `‹DECIDE›\n` and read the first token(s): `IG
 ```
 on_message(msg):
   if msg.author is our bot or any bot: return
+  if asleep(channel/server): return                  # /sleep kill-switch (below)
   forced = bot @mentioned OR msg replies to a bot message
   buffer msg; wait out a short DEBOUNCE so multi-message bursts form one turn
-  if not forced and not pass_consideration_filter(channel): return   # cost cap only
+  if not forced and not want_to_interject(channel): return   # reserved gate + cost cap
+  if msg has media: caption it now (§9) so the decision can see it
   ctx = assemble_context(channel)        # §8: metadata + memory + recent (+ captions)
   if forced:
       out = generate(ctx + "‹DECIDE›\nREPLY:")     # prime REPLY → never ignores
@@ -212,11 +234,23 @@ on_message(msg):
   send(render(out))                                 # text, or media via §9; re-encode mentions/emoji
 ```
 
-- **Forced replies bypass the gate** by priming `REPLY:`.
+- **Forced replies bypass the gate** by priming `REPLY:` (still answered even when
+  reserved — but **not** when asleep).
+- **Caption media before deciding** so the bot can react to a GIF/video/image
+  posted with no text. Bounded by the gate + cooldowns.
 - **Debounce (hole):** wait ~a few seconds of silence before treating a burst as a
   finished turn, so the bot doesn't reply mid-thought.
-- **Consideration pre-filter** = cost control only (channel active? cooldown
-  elapsed? sampled rate). The actual reply/ignore call stays the model's.
+- **Reserved by design (`want_to_interject`):** default to staying out. Bias the
+  gate toward `IGNORE` and **back off hard when 2+ humans are actively exchanging
+  messages** — prefer to chime in during lulls, on group-wide prompts, or when
+  addressed. A low **interjection rate** + a post-speak **cooldown** stop it
+  inserting itself into a flowing convo. All tunable in `config.yaml`
+  (`reservedness` / `interjection_rate` / `active_window`). This sits on top of the
+  model's own REPLY/IGNORE call, which is also trained to be reserved (§4).
+- **Kill switch (`/sleep`, `/wake`):** admin-only. `/sleep [scope] [duration]`
+  mutes the bot per-channel or server-wide (optional auto-wake after a duration);
+  `/wake` resumes. **State persisted** so it survives restarts. While asleep it
+  ignores everything (including @mentions) except `/wake`.
 - **Cooldowns** per channel/user; **anti-spam** so chiming into many undirected
   messages doesn't look bot-like to Discord (§12 #8).
 
@@ -225,25 +259,37 @@ on_message(msg):
 
 ---
 
-## 8. Memory & context subsystem
+## 8. Memory & context subsystem (context-maximizing)
 
-The 262k window is a **maximum, not a per-reply budget**: on 4 CPU cores, every
-context token is prefilled before the first output token, and the KV-cache for
-huge contexts eats many GB — feeding 200k tokens/reply would take minutes. So we
-cover "far back" with **tiers**, only ~1.5–3k of which are fed each reply.
+The 262k window is a **maximum, not a free per-reply budget** — on CPU every
+context token must be prefilled before the first output token. But your latency
+tolerance is generous (**~10 t/s gen, ≤~60s/reply**), and **prefix/KV-cache reuse**
+(§7) means the bulk of the context (the recent window) is prefilled *once* and
+reused, so each turn we only pay for new tokens. Net: we **maximize** context
+rather than minimize it. KV-cache RAM for even ~16k tokens at 0.8B is a few
+hundred MB — trivial in 24GB — so **time, not RAM, is the limit**, and caching +
+the §6 quantized KV cache address the time.
 
-| Your tier | How it's actually done | ~Tokens/reply |
-|-----------|------------------------|---------------|
-| "all past messages, far back" | **Retrieval** — embed every message into a local vector store; per reply, pull the top-k most relevant old messages (in-jokes, callbacks). | ~300–800 |
-| "important events" | **Events digest** — a compact, auto-extracted + curatable memory book ("the group trip to Z", "X & Y fell out in March"); retrieved or injected whole. | ~200–500 |
-| "channel name, time, people" | **Metadata header** — always injected, one line. | ~50–150 |
-| (immediate) | **Recent rolling window** — last N messages verbatim. | ~800–1500 |
-| (when media present) | **Image/GIF captions** — added only when relevant (§9). | ~100–300/img |
+| Your tier | How it's actually done | Notes |
+|-----------|------------------------|-------|
+| "all past messages, far back" | **Retrieval** — embed every message into a local vector store; per reply pull the top-k most relevant old messages (in-jokes, callbacks). | Volatile per reply (recomputed). |
+| "important events" | **Events digest** — compact, auto-extracted + curatable memory book ("the trip to Z", "X & Y fell out in March"). | Small; injected or retrieved. |
+| "channel name, time, people" | **Metadata header** — one line, always injected. | Cheap, changes slowly. |
+| (immediate) | **Recent rolling window** — last N messages verbatim, as **large as the budget allows**; cached prefix. | The big, cache-reused chunk. |
+| (when media present) | **Image/GIF/video captions** — added at consideration (§9). | ~hundreds of img-tokens each. |
 
-Net effect: effectively unbounded recall, fixed small prefill, fast on CPU. The
-big window mostly helps **training** (we can show long conversations). Embeddings
-via a small local model (e.g. a compact `bge`/`Qwen3-Embedding`), index in
-`sqlite`+`faiss`/`chroma`, rebuilt incrementally as the backup grows.
+**Sizing:** set the recent-window length from the M5 prefill benchmark — pick the
+largest window whose *cold* prefill still fits the ≤60s budget; warm turns are far
+cheaper thanks to cache reuse. Expect a much larger window than a typical CPU
+setup precisely because of the relaxed latency target + caching.
+
+> **Cache-ordering note:** put stable parts (metadata header, recent window) where
+> they stay cache-valid; volatile parts (retrieved memory) recompute each turn.
+> Order the prompt so adding volatile memory doesn't invalidate the cached window.
+
+Embeddings via a small local model (e.g. compact `bge`/`Qwen3-Embedding`); index
+in `sqlite`+`faiss`/`chroma`, rebuilt incrementally as the backup grows. The big
+window also helps **training** (we show long conversations, §5).
 
 **Deliverable:** `bot/memory.py`, `data/memory.db`, `assets/events.md`.
 
@@ -251,25 +297,25 @@ via a small local model (e.g. a compact `bge`/`Qwen3-Embedding`), index in
 
 ## 9. Media — reading & sending
 
-### Reading (incoming)
+### Reading (incoming) — captioned at consideration so the bot can react
 - **Links:** fetch title + OpenGraph description (oEmbed for YouTube/Tweets) →
   inject `[link: <title> — <desc>]`. *Security:* size limit + domain allowlist +
   sandbox (don't blindly fetch arbitrary user URLs).
-- **GIFs:** **title-first** — Tenor/Giphy slug/title is cheap and usually the most
-  meaningful signal for reaction GIFs. **Fallback:** for non-Tenor/uploaded GIFs
-  (or if we want literal content) sample a representative **frame** and caption it
-  with the vision path below. (A GIF is frames; a VLM sees stills — so we sample.)
+- **GIFs:** **always sample a single frame from the file** (default the *middle*
+  frame — most representative; first frame is often a title card; configurable) →
+  caption it with the vision path below. (A GIF is frames; a VLM sees stills.)
 - **Static images:** caption via the model's **own vision tower** — it *is* a VLM —
-  served on CPU through `llama.cpp` `--mmproj` / `llama-mtmd-cli`. Run **lazily**:
-  only when an image is present **and** the bot is engaging (REPLY / forced), never
-  on every message. Each image adds vision-encoder prefill (~seconds on 4 cores);
-  config flag to disable if too slow.
-- **Video:** **metadata only** (title/description). True frame-level understanding
-  is out of scope for this box.
+  served on CPU through `llama.cpp` `--mmproj` / `llama-mtmd-cli`.
+- **Video:** caption the **Discord thumbnail** (the preview image Discord attaches
+  to a video/embed) via the same vision path — no frame extraction from the video
+  itself.
+- Vision is **invoked only when media is present** and we're already considering
+  the message; each image adds vision-encoder time + image tokens (seconds on 4
+  cores) — fine within the ≤60s budget for 1–2 images. **Config flag** to disable.
 
 > Gated on the same arch spike as §6: Qwen3-VL has proven CPU `mmproj` GGUF
-> support; Qwen3.5-VL may lag. If so, fall back to title-only reading, or a
-> separate proven `Qwen3-VL` GGUF purely for captioning.
+> support; Qwen3.5-VL may lag. If so, fall back to a separate proven `Qwen3-VL`
+> GGUF purely for captioning, or text-only reading.
 
 ### Sending (outgoing)
 - `assets/media/` + `assets/media_manifest.json` map tags → path/URL + description.
@@ -288,7 +334,7 @@ refresh is very feasible. Automated pipeline (cron on the train box):
    canonical corpus. Text is tiny (even ~1M msgs ≈ a few hundred MB JSONL).
 2. **Rebuild** train/val with **recency weighting** so new slang/terms surface,
    and **excluding the bot's own output** (critical — else it mimics itself and
-   drifts; §12 #1).
+   drifts; §12 #2).
 3. **Retrain from base** (not continued-training) for stability/reproducibility —
    avoids catastrophic forgetting/drift across weeks.
 4. **Eval gate:** score against the **frozen holdout** + last-known-good. If it
@@ -304,18 +350,28 @@ refresh is very feasible. Automated pipeline (cron on the train box):
 
 ---
 
-## 11. Tokens-per-second — addressing the concern
+## 11. Tokens-per-second & the context budget
+
+Target: **~10 t/s generation is fine; total reply ≤~1 min.** So we spend the
+budget on **context**, not speed.
 
 | Path | Cost | Notes |
 |------|------|-------|
-| Decision (`IGNORE`) | prefill + **1 token** | Short context → sub-second to ~1–2s. |
-| Full reply | prefill + 10–40 tokens | ~10–30 t/s on 4 cores → ~1–4s. Fine for chat. |
-| With memory | + retrieval (ms) + a few hundred tokens prefill | Kept to the §8 budget. |
-| With vision | + vision-encoder prefill per image (~seconds) | Lazy; only when engaged. |
+| Generation | ~10–60 tokens at ~10 t/s | A few seconds; well inside 60s. |
+| Decision (`IGNORE`) | prefill + **1 token** | With cache reuse, only new tokens prefill → fast. |
+| Cold prefill (first turn / cache miss) | the big one | Sets the **max context** — pick the largest window whose cold prefill fits ≤60s (M5 benchmark). |
+| Warm prefill (cached prefix) | only new tokens | Cheap → large context stays affordable turn-to-turn. |
+| Vision | encoder + image tokens per image | Seconds each; 1–2 fits the budget. |
 
-**Levers if slow:** smaller quant, shorter window, KV-cache reuse per channel,
-single-worker queue + drop-stale, cooldowns, consideration cap, disable vision,
-or the smaller fallback model (§6, §12 #1).
+**Why context can be large here:** prefill (prompt processing) is batched and
+faster per-token than sequential generation, MoE means fewer active params per
+token, and **prefix caching** removes repeated prefill of the recent window. The
+budget is mostly consumed by *cold* prefill, which happens rarely per channel.
+
+**Levers (to grow or protect context):** prefix/KV-cache reuse + persistent
+per-channel slots, quantized KV cache, lower-temp short replies; if a cold prefill
+ever blows the budget, trim the window or fewer retrieved snippets, or disable
+vision. Fallback model (§6, §12 #1) if the arch is unsupported.
 
 ---
 
@@ -333,16 +389,21 @@ or the smaller fallback model (§6, §12 #1).
 5. **Mention/emoji/sticker encoding** both directions (`<@id>`, `<:emoji:id>`) (§4,§7).
 6. **Turn debounce** — reply per finished turn, not per message (§7).
 7. **Disk creep** on 150GiB from weekly GGUFs/checkpoints → retention policy (§10).
-8. **Spam/ban risk** — a bot answering many undirected msgs looks bot-like →
-   cooldowns + consideration cap.
+8. **Spam / ban / interrupting** — a bot answering many undirected msgs looks
+   bot-like *and* annoys people → the **reserved gate** + cooldowns + active-convo
+   backoff (§7) are the main control; tune `reservedness` vs going fully mute. The
+   `/sleep` kill switch is the hard override.
 9. **No clean "sounds like us" metric** — human spot-check protocol + holdout
    next-message perplexity as a rough proxy.
-10. **Vision cost/feasibility on CPU** — lazy + title-first + disable flag (§9,§11).
-11. **Privileged Message Content Intent** must be on (§3).
-12. **Overfitting** a 0.8B on a smallish corpus → dedupe, small LoRA, dropout,
+10. **Vision cost on CPU** — now used for any image/GIF/video → bound with the
+    consideration cap, cache reuse, and a disable flag (§9, §11).
+11. **Cold-prefill latency** — first turn per channel pays full prefill; size the
+    window so even that fits ≤60s; warm turns are cheap (§8, §11).
+12. **Privileged Message Content Intent** must be on (§3).
+13. **Overfitting** a 0.8B on a smallish corpus → dedupe, small LoRA, dropout,
     early-stop, generic mix (§5).
-13. **URL-fetch security** (SSRF/malware) — allowlist + size limit + sandbox (§9).
-14. **4060 VRAM** assumed 8GB → QLoRA; 16GB allows plain LoRA / bigger batch.
+14. **URL-fetch security** (SSRF/malware) — allowlist + size limit + sandbox (§9).
+15. **4060 VRAM** assumed 8GB → QLoRA; 16GB allows plain LoRA / bigger batch.
 
 ---
 
@@ -356,7 +417,7 @@ Moderation is *none* by design — operational notes only, not filtering:
   involving minors) — a legal/ToS boundary independent of the bot's personality.
   Everything else (crude, aggressive, explicit adult banter among consenting
   adults) is in scope.
-- Model runs **text-only by default**; vision is opt-in/lazy (§9).
+- Vision loads the encoder but only runs when media is present (§9).
 - **Secrets** in `.env`; `data/`, `models/`, `.env` are git-ignored (raw logs +
   weights stay off GitHub).
 
@@ -384,16 +445,19 @@ replicator/
 ## 15. Milestones
 
 - **M0 — Scaffold:** skeleton, deps, config, `.gitignore`, bot connects, `/ping`.
-- **M1 — Collect:** `/init` incremental scrape (incl. threads/forums) → JSONL.
+- **M1 — Collect:** `/init` incremental scrape (incl. threads/forums + thumbnails) → JSONL.
 - **M2 — Preprocess:** raw → `{train,val,holdout}.jsonl` with decision sentinels,
-  media tags, mention/emoji decoding, bot-output exclusion.
+  media captions/tags, mention/emoji decoding, bot-output exclusion.
 - **M3 — Spike (de-risk):** convert *stock* Qwen3.5-0.8B-Base (and `mmproj`) to
   GGUF; confirm `llama.cpp` runs it on the CPU box **before** training (risk #1).
-- **M4 — Finetune:** QLoRA on the 4060; eval vs holdout + samples.
-- **M5 — Export:** merge + GGUF + quantize; round-trip + t/s benchmark.
-- **M6 — Serve:** CPU runtime; model-driven REPLY/IGNORE; forced reply; debounce.
-- **M7 — Memory:** retrieval + events digest + metadata header (§8).
-- **M8 — Media:** sending manifest + reading (links/GIF titles; lazy vision).
+- **M4 — Finetune:** QLoRA on the 4060 (long seq len); eval vs holdout + samples.
+- **M5 — Export & benchmark:** merge + GGUF + quantize; round-trip; **measure
+  prefill/gen t/s to set the max-context budget** (§8, §11).
+- **M6 — Serve:** CPU runtime; model-driven REPLY/IGNORE; forced reply; debounce;
+  **reserved interjection gate**; **`/sleep`·`/wake` kill switch**; prefix/KV-cache reuse.
+- **M7 — Memory:** retrieval + events digest + metadata header; size the window (§8).
+- **M8 — Media:** sending manifest + reading (links; GIF single-frame; video
+  thumbnail; image vision), captioned at consideration.
 - **M9 — Freshness:** weekly retrain loop + eval gate + hot-swap + disk policy.
 - **M10 — Harden:** cooldowns, queue, logging, systemd, retention.
-- **M11 — Iterate:** tune persona/data until it sounds like us.
+- **M11 — Iterate:** tune persona/data/context length until it sounds like us.

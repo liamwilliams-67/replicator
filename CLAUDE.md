@@ -24,6 +24,10 @@ merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 - **Model decides whether to reply** by emitting a `REPLY`/`IGNORE` sentinel as
   its first token. `IGNORE` = 1 token then stop (cheap). **Always** reply when
   @mentioned or replied-to (runtime primes `REPLY:` to force it).
+- **Reserved by design:** biased to stay *out* of active human conversations
+  (don't interrupt) — gate skews to `IGNORE`, backs off during live exchanges,
+  low interjection rate + cooldown. Admin **`/sleep`·`/wake`** kill switch
+  (persisted) hard-mutes it.
 - **No output content filter** (raw mimicry; 18+ in scope). Only hard line is
   illegal content. Don't add a filter unless asked.
 - **Base** model, not Instruct — the finetune supplies the personality.
@@ -62,6 +66,7 @@ merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 _None yet — fill in as the project is scaffolded (M0)._
 - run bot: `TBD`
 - scrape: `/init` (in Discord, admin-only)
+- mute / unmute: `/sleep [scope] [duration]` · `/wake` (admin-only)
 - preprocess / finetune / export / weekly-retrain: `TBD`
 
 ## Git workflow

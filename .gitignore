@@ -1,0 +1,13 @@
+# secrets & large artifacts — see CLAUDE.md conventions
+.env
+data/
+models/
+
+# spike outputs (downloaded GGUFs land in models/, reports are regenerated)
+spike/results/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

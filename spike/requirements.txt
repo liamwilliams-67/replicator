@@ -1,0 +1,4 @@
+# Spike harness deps (the heavy convert deps — torch, transformers, gguf — come
+# from llama.cpp's own requirements file, which run_spike.sh installs).
+huggingface_hub>=0.24
+requests>=2.31

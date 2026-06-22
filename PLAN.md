@@ -46,7 +46,7 @@ Three stages, two machines:
 | 5 | Reading media | **Links→text; GIF→single frame; video→Discord thumbnail; image→vision** | Model *is* a VLM; media captioned at consideration time so the bot can react to it. |
 | 6 | Memory | **Tiered, context-maximizing** (recent window + retrieval over all history + events digest + metadata) | Covers "far back" and fills the latency budget via cache reuse — not a 262k prefill. |
 | 7 | Freshness | **Weekly full retrain from base** | Backup → retrain → eval gate → hot-swap. Recency-weighted. |
-| 8 | Interjection | **Reserved + kill switch** | Gate biased to `IGNORE`, backs off during active human convos; `/sleep`·`/wake` admin mute (persisted). |
+| 8 | Interjection | **`activity` dial (0–1) + reserved + kill switch** | `0` = only mentions/replies; `1` = nearly every message. Backs off in active convos. `/activity`·`/sleep`·`/wake` runnable by **anyone**; setup is owner-gated. |
 
 Base (not Instruct) is the right call: instruct/RLHF variants are aligned to be
 friendly and would fight the "aggressive/less friendly" target. A base model
@@ -65,6 +65,10 @@ Privileged, admin-only slash command that scrapes the server into a corpus.
 - Permissions: *Read Message History*, *View Channels*.
 - Slash commands must ack within 3s → `/init` **defers** and scrapes in the
   background, posting progress follow-ups.
+- **Trigger/permissions:** the heavy scrape is **owner-gated** (the *bot-application
+  owner* — works even though you're not a server admin), or better, run the same
+  logic as an **offline script** (`scripts/scrape.py`) with the bot token so it
+  isn't a public command randoms can fire (§7, §12).
 
 **Scope (easy to miss):** regular text channels **and threads + forum-channel
 posts** (each thread is its own channel). Skip voice/stage unless they have text.
@@ -240,17 +244,23 @@ on_message(msg):
   posted with no text. Bounded by the gate + cooldowns.
 - **Debounce (hole):** wait ~a few seconds of silence before treating a burst as a
   finished turn, so the bot doesn't reply mid-thought.
-- **Reserved by design (`want_to_interject`):** default to staying out. Bias the
-  gate toward `IGNORE` and **back off hard when 2+ humans are actively exchanging
-  messages** — prefer to chime in during lulls, on group-wide prompts, or when
-  addressed. A low **interjection rate** + a post-speak **cooldown** stop it
-  inserting itself into a flowing convo. All tunable in `config.yaml`
-  (`reservedness` / `interjection_rate` / `active_window`). This sits on top of the
-  model's own REPLY/IGNORE call, which is also trained to be reserved (§4).
-- **Kill switch (`/sleep`, `/wake`):** admin-only. `/sleep [scope] [duration]`
-  mutes the bot per-channel or server-wide (optional auto-wake after a duration);
-  `/wake` resumes. **State persisted** so it survives restarts. While asleep it
-  ignores everything (including @mentions) except `/wake`.
+- **Activity dial (`activity` 0–1) — the master chattiness knob.** `0` = only
+  forced (mentions/replies), and we **skip undirected messages entirely** (no model
+  call → saves CPU). `1` = chime in on nearly every message. Implemented by reading
+  the model's first-token **REPLY-vs-IGNORE probability** and replying when it
+  clears a threshold set by `activity` — principled (still respects context), not a
+  blind coin. Settable **globally or per-channel**; default low.
+- **Don't-interrupt backoff:** on top of `activity`, lower the effective chance
+  during **active 2+ human exchanges** (strong at low activity, minimal near `1`),
+  plus a post-speak **cooldown** — so even when chatty it waits for lulls. The
+  finetune is also trained to be reserved (§4).
+- **Kill switch (`/sleep`, `/wake`):** `/sleep [scope] [duration]` mutes per-channel
+  or server-wide (optional auto-wake); `/wake` resumes. **State persisted** across
+  restarts. While asleep it ignores everything (including @mentions) except `/wake`.
+- **Command permissions:** runtime commands (`/activity`, `/sleep`, `/wake`) are
+  **open to everyone** — no server-admin needed (you aren't one). Only the heavy
+  scrape is owner-gated / offline (§3). Add per-command **cooldowns** to blunt
+  griefing (§12 #18).
 - **Cooldowns** per channel/user; **anti-spam** so chiming into many undirected
   messages doesn't look bot-like to Discord (§12 #8).
 
@@ -404,6 +414,17 @@ vision. Fallback model (§6, §12 #1) if the arch is unsupported.
     early-stop, generic mix (§5).
 14. **URL-fetch security** (SSRF/malware) — allowlist + size limit + sandbox (§9).
 15. **4060 VRAM** assumed 8GB → QLoRA; 16GB allows plain LoRA / bigger batch.
+16. **Backlog on reconnect** — after downtime the bot must **ignore stale
+    messages** (only react to live ones), or it mass-replies to a backlog.
+17. **CPU saturation at high `activity`** — `activity≈1` + media + a busy channel
+    can outrun the single CPU worker → auto-throttle activity, cap in-flight,
+    drop-stale (§7, §11).
+18. **Open commands → griefing** — anyone can mute or crank chattiness → per-command
+    cooldowns; keep the heavy scrape owner-gated/offline (§3, §7).
+19. **Corpus backup / data loss** — the scraped JSONL is the irreplaceable asset and
+    is git-ignored on a CPU box → back it up off-box on a schedule.
+20. **Embedding compute shares the 4 cores** — precompute message embeddings at
+    scrape/retrain time; only embed the *query* live (§8).
 
 ---
 
@@ -454,7 +475,8 @@ replicator/
 - **M5 — Export & benchmark:** merge + GGUF + quantize; round-trip; **measure
   prefill/gen t/s to set the max-context budget** (§8, §11).
 - **M6 — Serve:** CPU runtime; model-driven REPLY/IGNORE; forced reply; debounce;
-  **reserved interjection gate**; **`/sleep`·`/wake` kill switch**; prefix/KV-cache reuse.
+  **`activity` dial (0–1) + don't-interrupt backoff**; **`/activity`·`/sleep`·`/wake`**
+  (open to all); ignore-stale-on-reconnect; prefix/KV-cache reuse.
 - **M7 — Memory:** retrieval + events digest + metadata header; size the window (§8).
 - **M8 — Media:** sending manifest + reading (links; GIF single-frame; video
   thumbnail; image vision), captioned at consideration.

@@ -24,10 +24,13 @@ merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 - **Model decides whether to reply** by emitting a `REPLY`/`IGNORE` sentinel as
   its first token. `IGNORE` = 1 token then stop (cheap). **Always** reply when
   @mentioned or replied-to (runtime primes `REPLY:` to force it).
-- **Reserved by design:** biased to stay *out* of active human conversations
-  (don't interrupt) — gate skews to `IGNORE`, backs off during live exchanges,
-  low interjection rate + cooldown. Admin **`/sleep`·`/wake`** kill switch
-  (persisted) hard-mutes it.
+- **`activity` dial (0–1)** is the master chattiness knob: `0` = only mentions/
+  replies, `1` = nearly every message. Implemented as a threshold on the model's
+  REPLY/IGNORE probability; a don't-interrupt backoff still avoids cutting into
+  active human exchanges. Settable per-channel. **`/sleep`·`/wake`** hard-mutes
+  (persisted).
+- **Commands are open to everyone** (you're not a server admin) — only the heavy
+  scrape is owner-gated / run offline.
 - **No output content filter** (raw mimicry; 18+ in scope). Only hard line is
   illegal content. Don't add a filter unless asked.
 - **Base** model, not Instruct — the finetune supplies the personality.
@@ -65,8 +68,9 @@ merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 ## Commands
 _None yet — fill in as the project is scaffolded (M0)._
 - run bot: `TBD`
-- scrape: `/init` (in Discord, admin-only)
-- mute / unmute: `/sleep [scope] [duration]` · `/wake` (admin-only)
+- scrape: `/init` — **owner-gated**, or offline `scripts/scrape.py` (not public)
+- chattiness: `/activity [0..1] [scope]` (anyone)
+- mute / unmute: `/sleep [scope] [duration]` · `/wake` (anyone)
 - preprocess / finetune / export / weekly-retrain: `TBD`
 
 ## Git workflow

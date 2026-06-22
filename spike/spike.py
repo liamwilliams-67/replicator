@@ -142,7 +142,7 @@ def recommend_context(prefill_tps: dict, reuse_works: bool, budget_s: float) -> 
 # subcommand: bench
 # --------------------------------------------------------------------------- #
 def cmd_bench(a) -> None:
-    cmd = [a.bench, "-m", a.model, "-t", str(a.threads),
+    cmd = [a.bench, "-m", a.model, "-t", str(a.threads), "-ngl", str(a.ngl),
            "-p", a.ctx, "-n", str(a.ngen), "-o", "json"]
     rows = json.loads(run_capture(cmd))
     summary = summarize_bench(rows)
@@ -212,8 +212,9 @@ def cmd_cachetest(a) -> None:
     log_path = os.path.join(a.out, f"server__{a.label}.log")
     server_log = open(log_path, "w")
     proc = subprocess.Popen(
-        [a.server, "-m", a.model, "-t", str(a.threads), "-c", str(a.ctx),
-         "--host", "127.0.0.1", "--port", str(a.port), "-np", "1"],
+        [a.server, "-m", a.model, "-t", str(a.threads), "-ngl", str(a.ngl),
+         "-c", str(a.ctx), "--host", "127.0.0.1", "--port", str(a.port),
+         "-np", "1"],
         stdout=server_log, stderr=subprocess.STDOUT)
     try:
         _wait_for_health(base_url, proc, timeout=600)
@@ -393,6 +394,7 @@ def main() -> None:
     b.add_argument("--label", required=True)
     b.add_argument("--quant", required=True)
     b.add_argument("--threads", type=int, default=4)
+    b.add_argument("--ngl", type=int, default=0, help="GPU layers (0 = CPU)")
     b.add_argument("--ctx", default="512,1024,2048,3072")
     b.add_argument("--ngen", type=int, default=128)
     b.add_argument("--out", default="spike/results")
@@ -403,6 +405,7 @@ def main() -> None:
     c.add_argument("--model", required=True)
     c.add_argument("--label", required=True)
     c.add_argument("--threads", type=int, default=4)
+    c.add_argument("--ngl", type=int, default=0, help="GPU layers (0 = CPU)")
     c.add_argument("--ctx", type=int, default=4096)
     c.add_argument("--base-tokens", type=int, default=1536, dest="base_tokens")
     c.add_argument("--port", type=int, default=8080)

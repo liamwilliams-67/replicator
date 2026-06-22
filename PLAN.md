@@ -43,6 +43,15 @@ Three stages, two machines:
   images/video-thumbnails, remember far back via a **tiered memory** (§8), and
   stay current via a **weekly retrain** (§10).
 
+> **Dev workflow (local-first).** Until the project is complete, run *everything*
+> on the **dev PC** (the 4060 box) — scrape, train, serve, and the live bot —
+> using the **same `llama.cpp` runtime** as prod but GPU-accelerated (`-ngl`).
+> The CPU serve box only enters at **final deployment**. Backend is config-driven
+> (`n_gpu_layers`, `n_threads`, `n_ctx`) so PC-dev → CPU-prod is a config swap.
+> ⚠️ GPU dev *hides* the CPU prefill/cache limits (§8, §11): keep a **small-context
+> "prod profile"** and validate at the target context — and run the M3 cache test,
+> whose verdict transfers — **before** deploying.
+
 ---
 
 ## 2. Resolved decisions (from kickoff + follow-ups + research)
@@ -345,9 +354,13 @@ live query** (§12 #20) so retrieval doesn't fight generation for the 4 cores.
 ## 9. Media — reading & sending
 
 ### Reading (incoming) — captioned at consideration so the bot can react
-- **Links:** fetch title + OpenGraph description (oEmbed for YouTube/Tweets) →
-  inject `[link: <title> — <desc>]`. *Security:* size limit + domain allowlist +
-  sandbox (don't blindly fetch arbitrary user URLs).
+- **Links (no crawler needed):** Discord already unfurls most links into
+  `message.embeds` (title/description/thumbnail) — **read those first, zero
+  fetches**. Only when an embed is missing, do a **single-page** metadata fetch
+  (`<title>` + `og:*`/`description`; oEmbed for YouTube/Tweets) — an *unfurler*,
+  not a recursive spider. Inject `[link: <title> — <desc>]`. *Security:* domain
+  allowlist + size limit + timeout + block private IPs (SSRF) — don't blindly
+  fetch arbitrary user URLs (§12 #14).
 - **GIFs:** **always sample a single frame from the file** (default the *middle*
   frame — most representative; first frame is often a title card; configurable) →
   caption it with the vision path below. (A GIF is frames; a VLM sees stills.)

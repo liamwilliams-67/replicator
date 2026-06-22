@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Replicator M3 serve-stack spike (go/no-go).
 #
-# RUN THIS ON THE CPU SERVE BOX. It:
+# Run this on whatever machine you're developing on — your PC is fine, you do
+# NOT need the CPU serve box yet. The cache-reuse verdict transfers; only the
+# latency numbers are machine-specific (see README; GPU via BUILD_CUDA/NGL). It:
 #   1. builds (or locates) llama.cpp,
 #   2. downloads the stock base models, converts them to GGUF and quantizes to
 #      Q4_K_M + Q8_0 (the quants we'd actually ship),
@@ -40,9 +42,11 @@ else
   fi
   if [[ ! -x "$LLAMA_SRC/build/bin/llama-bench" ]]; then
     have cmake || die "cmake not found (needed to build llama.cpp)"
-    log "Building llama.cpp (CPU, native)"
+    CUDA_FLAG="-DGGML_CUDA=OFF"
+    [[ "${BUILD_CUDA:-OFF}" == "ON" ]] && CUDA_FLAG="-DGGML_CUDA=ON"
+    log "Building llama.cpp (native; CUDA=${BUILD_CUDA:-OFF})"
     cmake -S "$LLAMA_SRC" -B "$LLAMA_SRC/build" \
-      -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
+      -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DLLAMA_CURL=OFF "$CUDA_FLAG"
     cmake --build "$LLAMA_SRC/build" -j --config Release
   fi
   BIN="$LLAMA_SRC/build/bin"
@@ -90,7 +94,7 @@ for entry in "${MODELS[@]}"; do
     gguf="$WORK/$label-$q.gguf"
     log "Bench $label $q"
     python3 "$HERE/spike.py" bench --bench "$BENCH" --model "$gguf" \
-      --label "$label" --quant "$q" --threads "$THREADS" \
+      --label "$label" --quant "$q" --threads "$THREADS" --ngl "$NGL" \
       --ctx "$CTX_LIST" --ngen "$NGEN" --out "$RESULTS"
   done
 done
@@ -101,7 +105,7 @@ for entry in "${MODELS[@]}"; do
   gguf="$WORK/$label-Q4_K_M.gguf"
   log "Cache-reuse test $label"
   python3 "$HERE/spike.py" cachetest --server "$SERVER" --model "$gguf" \
-    --label "$label" --threads "$THREADS" --ctx "$SERVER_CTX" \
+    --label "$label" --threads "$THREADS" --ngl "$NGL" --ctx "$SERVER_CTX" \
     --base-tokens "$BASE_TOKENS" --port "$PORT" --out "$RESULTS"
 done
 

@@ -1,9 +1,15 @@
 # M3 spike — serve-stack go/no-go
 
 The single most important de-risking step before any long training run
-(PLAN.md §6, milestone **M3**). It decides, **on the actual CPU serve box** and
-at the **actual serving quantization (Q4_K_M / Q8_0)**, whether we serve the
-primary `Qwen3.5-0.8B-Base` or fall back to `Qwen3-0.6B-Base` (+ `Qwen3-VL`).
+(PLAN.md §6, milestone **M3**). It decides, at the **actual serving
+quantization (Q4_K_M / Q8_0)**, whether we serve the primary
+`Qwen3.5-0.8B-Base` or fall back to `Qwen3-0.6B-Base` (+ `Qwen3-VL`).
+
+**You do not need the CPU serve box to run this — your dev PC is fine.** The
+decisive cache-reuse verdict (b, below) is a property of the model architecture
++ llama.cpp, so it **transfers** from your PC to the CPU box. Only the latency
+numbers (c) are machine-specific; re-confirm those on the real box right before
+final deploy.
 
 ## The three questions it answers
 
@@ -34,9 +40,24 @@ The fallback `Qwen3-0.6B-Base` (a plain transformer) is also tested as a
 ## Run it
 
 ```bash
-# on the CPU serve box, from the repo root:
+# from the repo root, on your dev PC (or eventually the serve box):
 bash spike/run_spike.sh
 ```
+
+### Running on your dev PC (GPU optional)
+Defaults are **CPU-only** (`NGL=0`, `BUILD_CUDA=OFF`) so the latency numbers
+resemble a CPU box. To answer the cache-reuse question *fast* on your 4060, set
+in `config.env`:
+
+```bash
+BUILD_CUDA=ON     # build llama.cpp with CUDA (needs the CUDA toolkit installed)
+NGL=99            # offload all layers to the GPU
+THREADS=<cores>   # your PC's core count
+```
+
+The **REUSE_WORKS / FULL_REPREFILL verdict is unchanged** by GPU vs CPU — only
+the t/s numbers change. So a quick GPU run still tells you whether Qwen3.5 is
+viable; do a final CPU-only latency pass (here or on the serve box) before deploy.
 
 It will: build/locate llama.cpp → download the base models → convert → quantize
 to Q4_K_M + Q8_0 → benchmark → run the cache-reuse test → write

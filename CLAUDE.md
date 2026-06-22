@@ -25,6 +25,10 @@ Both are gated on the **M3 spike**; confirmed-working fallback is
 Scrape (offline script + live append) → JSONL (collect) → QLoRA on a **4060** (train) →
 merge + GGUF + quantize → `llama.cpp` on a **CPU-only box** (serve), with a
 **weekly retrain** loop. Train on GPU, serve on CPU — two different machines.
+**Dev (local-first):** run *everything* on the **4060 PC** (GPU-accelerated
+`llama.cpp`) until complete; the CPU box is **final-deploy only**. Backend is
+config-driven (`n_gpu_layers`/`n_threads`/`n_ctx`); keep a small-context "prod
+profile" so GPU speed doesn't hide the CPU prefill/cache limits (PLAN §8/§11).
 
 ## Locked-in decisions (don't relitigate without asking)
 - **Serve on CPU** via `llama.cpp`/GGUF (4 threads, 24GB RAM), **text-only by
